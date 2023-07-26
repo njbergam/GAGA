@@ -18,9 +18,10 @@ from pykrige.uk import UniversalKriging
 from pykrige.ok import OrdinaryKriging
 import random
 from scipy.interpolate import LinearNDInterpolator
+from matplotlib.animation import FuncAnimation
 
 ### IMPORTANT BOUNDING BOXES
-r = 0.01
+r = 2
 jakobs = [69.10-r, 69.10+r, -49.5-r, -49.5+r]
 helheim = [66.21-r,66.21+r, -38.12-r,-38.12+r]
 
@@ -91,33 +92,52 @@ class Graph:
         self.bbox_specialize(self.bbox)
         self.spec_label = str(self.time_window)
 
-    def krige(self,toplot=False,downsample=False,basis_pts=[], resolution=200,bbox=[]):
+    # krige on the given test coordinates 
+    def krige_given(self, test_coords):
+        x = self.x_spec
+        y = self.y_spec
+        z = self.z_spec
+        if len(x) > 1000:
+            indices = random.sample(list(range(len(x))), 1000)
+            x = np.take(self.x_spec, indices)
+            y = np.take(self.y_spec, indices)
+            z = np.take(self.z_spec, indices)
+        OK = OrdinaryKriging(x,y,z,variogram_model="spherical")
+        zpred, error = OK.execute("points", test_coords[:,0], test_coords[:,1])
+        return zpred, error
+
+    def krige(self,toplot=False, downsample=False ,basis_pts=[], resolution=200,bbox=[]):
         # if bbox is empty we use the default spec
 
         x = self.x_spec
         y = self.y_spec
         z = self.z_spec
 
-        if downsample:
+        print('number of points for kriging:', str(len(x)))
+        if len(x) > 1000:
+            downsample=True
+
+        if downsample==True:
             indices = random.sample(list(range(len(x))), 1000)
             x = np.take(self.x_spec, indices)
             y = np.take(self.y_spec, indices)
             z = np.take(self.z_spec, indices)
-            print('number of points being used:', len(indices))
 
         OK = OrdinaryKriging(
             x,y,z,
             variogram_model="spherical",
         )
-        
-        test_x = np.linspace(min(x), max(x), resolution)
-        test_y = np.linspace(min(y), max(y), resolution)
+
+        test_x = np.linspace(self.bbox[2], self.bbox[3], resolution)
+        test_y = np.linspace(self.bbox[0], self.bbox[1], resolution)
         pairs = []
         for s in test_x:
             for t in test_y:
                 pairs.append([s,t])
+
         pairs = greenland_filter(pairs)
         pairs=np.array(pairs)
+
         zpred, error = OK.execute("points", pairs[:,0], pairs[:,1])
 
         if toplot:
@@ -130,8 +150,8 @@ class Graph:
 
         return pairs, zpred, error
 
-    def krige_tamed(self,saveto):
-        points, zpred, error = self.krige(resolution=50, downsample=True)
+    def krige_tamed(self, saveto, toplot=False):
+        points, zpred, error = self.krige(resolution=50, downsample=False)
         tri = Delaunay(points)
         f1 = figure(figsize=(6,8))
         x = points[:,0]
@@ -154,15 +174,19 @@ class Graph:
         p_values = interp(pairs[:,0], pairs[:,1])
 
 
+        if toplot:
+            pairs = pairs[np.where(p_values>250)]
+            p_values = p_values[np.where(p_values>250)]
+            
+            sc = plt.scatter(pairs[:,0], pairs[:,1], c=p_values, s=10)
+            plt.scatter(points[:,0], points[:,1], c=zpred, s=3)
+            plt.colorbar(sc) 
+            plt.title('Helheim Glacier: '+str(self.time_window))
+            plt.savefig('samples/'+saveto+': ' +str(self.time_window) + '.png')
+            
+        # return the locations and their corresponding predicted value
+        return pairs, p_values
 
-        pairs = pairs[np.where(p_values>250)]
-        p_values = p_values[np.where(p_values>250)]
-
-        sc = plt.scatter(pairs[:,0], pairs[:,1], c=p_values, s=10)
-        plt.scatter(points[:,0], points[:,1], c=zpred, s=3)
-        plt.colorbar(sc) 
-        plt.title('Helheim Glacier: '+str(self.time_window))
-        plt.savefig('samples/'+saveto+': ' +str(self.time_window) + '.png')
 
 
 
@@ -219,6 +243,171 @@ class Graph:
                  
         plt.savefig(saveto+".png")
 
+
+    # find the crossover points in the image
+    def crossovers(self, saveto='crossovers'):
+
+        x = self.x_spec
+        y = self.y_spec
+        z = self.z_spec
+
+        coord = np.column_stack([x,y])
+        coordinates = coord
+        rad = 0.007
+
+        A1 = radius_neighbors_graph(coordinates, rad, mode='connectivity', include_self=False).toarray()
+        A2 = kneighbors_graph(coordinates, 10, mode='connectivity', include_self=False).toarray()
+        A = np.minimum(A1,A2)
+        #A = radius_neighbors_graph(coordinates, rad, mode='distance', include_self=False).toarray()
+        ixs = np.where(sum(A)>max(sum(A))-2)[0]
+        print(sum(A))
+        print(ixs)
+
+        pts = coordinates[ixs]
+        plt.close()
+        
+        G=nx.from_numpy_array(A)
+        positions = dict(zip(G.nodes, coordinates))
+        nx.draw(G, pos=positions, node_size=.5, node_color="b")
+        plt.scatter(x,y,c=z,s=0.1)
+
+        plt.scatter(pts[:,0], pts[:,1],c='r')
+        plt.savefig(saveto+'.png')
+    
+        return pts[:,0], pts[:,1]
+
+
+def time_interp(z_s, num_times):
+    #xnew = #[xy_s[0]]
+    z_new = []
+    for i in range(z_s.shape[1]):
+        t_given = list(range(len(z_s[:,i])))
+        t_eval = np.linspace(min(t_given), max(t_given), 100)
+        z_new.append( np.interp(t_eval, t_given, z_s[:,i]) )
+    return z_new
+
+def alps_interpolate(title, bbox):
+    gr = pd.read_pickle("greenland_clean.pkl") 
+    # doing periods of half a year
+    period = [2003,2004]
+    gr = Graph(gr, period)
+    gr.bbox_specialize(bbox,add_label='helheim')
+    # going to do a specific location for now
+
+    # PICK GRID POINTS ahead of time NOW
+    test_x = np.linspace(gr.bbox[2], gr.bbox[3], 100)
+    test_y = np.linspace(gr.bbox[0], gr.bbox[1], 100)
+    pairs = []
+    for x in test_x:
+        for y in test_y:
+            pairs.append([x,y])
+    pairs = greenland_filter(pairs)
+    xy = np.array(pairs)
+
+    z_s = []    
+    for i in range(5):
+        #embed()
+        
+
+        ### 1) krige + delaunay
+        
+        # pairs, values = gr.krige_tamed(saveto='',toplot=False)
+
+        ### 2) krige + alps + delaunay
+
+        # first we get the values from kriging
+        #pairs, values, error = gr.krige(resolution=50, downsample=False)
+        
+        values, error = gr.krige_given(xy)
+        # then we run alps on those values
+
+        z_s.append(list(values))
+        #period = [period[0]+0.5,period[1]+0.5]
+        gr.shift_time_window(0.5)
+
+    # interpolating for a richer animation
+    #embed()
+    z_s = np.array(z_s)
+    #embed()
+    #z_s = np.array(time_interp(z_s, 100)).T
+    
+
+
+    animate(title, xy,z_s)
+
+
+    # we would like to increase the granularity of the time steps, 
+    # looking at 0.05 of a year (so around 10) between each half year mark
+
+    # but let's look at things without alps interp for nows
+
+def animate_grid(frames, saveto):
+    fig, ax = plt.subplots()
+    xdata, ydata = [], []
+    ln, = ax.plot([], [], 'ro')
+    p = frames
+
+    def init():
+        plt.imshow(p[0], cmap='hot', interpolation='nearest')
+        return ln,
+
+    def update(frame):
+        plt.imshow(p[frame], cmap='hot', interpolation='nearest')
+        return ln,
+    print('animating!')
+    ani = FuncAnimation(fig, update, frames=list(range(len(frames))), init_func=init, blit=True)
+    ani.save(saveto, writer='pillow', fps=60)
+
+
+def animate(title, xy, z_s):
+    fig, ax = plt.subplots()
+    xdata, ydata = [], []
+    ln, = ax.plot([], [], 'ro')
+
+    start = 2003
+    end = 2009
+    num_steps = len(z_s)
+
+    def init():
+        plt.xlabel('longitude')
+        plt.ylabel('latitude')
+        plt.title(title + ", 2003")
+        plt.scatter(xy[:,0], xy[:,1], c=z_s[0])
+        return ln,
+
+    def update(frame):
+        if frame < len(z_s):
+            plt.cla()
+            plt.xlabel('longitude')
+            plt.ylabel('latitude')
+            plt.title(title + "," + str(  (end-start)*(frame+1)/num_steps + start   ))
+
+            ixs = np.where(z_s[frame] > 300)
+            #embed()
+            show = xy[ixs]
+            show_z = z_s[frame][ixs]
+
+            plt.scatter(show[:,0], show[:,1], c=show_z)
+        else:
+            # stop at last one
+            plt.cla()
+            plt.xlabel('longitude')
+            plt.ylabel('latitude')
+            plt.title(title + "," + str(  end   ))
+
+            ixs = np.where(z_s[-1] > 300)
+            #embed()
+            show = xy[ixs]
+            show_z = z_s[-1][ixs]
+
+            plt.scatter(show[:,0], show[:,1], c=show_z)
+        return ln,
+
+    ani = FuncAnimation(fig, update, frames=list(range(len(z_s)+3)), init_func=init, interval=400,blit=True)
+    ani.save(title+'.gif', writer='pillow')#, fps=10000)
+
+
+
 def main():
     gr = pd.read_pickle("greenland_clean.pkl") 
     period = [2003,2004]
@@ -246,3 +435,4 @@ def main():
     # Krige-tamed Delaunay
 
 #main()
+alps_interpolate('Whole 2003-2009', bbox=[-73.297, 60.03676, -12.20855, 83.64513])
