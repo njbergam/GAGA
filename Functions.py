@@ -23,7 +23,7 @@ import math
 
 ### IMPORTANT BOUNDING BOXES
 r = 1
-jakobs = [69.10-r, 69.10+r, -49.5-r, -49.5+r]
+jakobs = [-49.5-r, -49.5+r, 69.10-r, 69.10+r]
 helheim = [66.21-r,66.21+r, -38.12-r,-38.12+r]
 
 # Given points in latitude/longitude,  
@@ -496,6 +496,9 @@ def animate(title, xy, z_s):
 
     ani = FuncAnimation(fig, update, frames=list(range(len(z_s)+3)), init_func=init, interval=400,blit=True)
     ani.save(title+'.gif', writer='pillow')#, fps=10000)
+
+
+#def coarsen_graph():
 
 
 
